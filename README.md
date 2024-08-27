@@ -24,7 +24,9 @@ cd amazon-bedrock-connect-helper/src
     Note: boto3 should be pre-installed on Amazon EC2 instances with Amazon Linux 2 AMI.
 
 ```bash
+cd bedrock_connect_helper
 pip install -r requirements.txt
+cd ..
 ```
 
 3. **Execute the test script**
