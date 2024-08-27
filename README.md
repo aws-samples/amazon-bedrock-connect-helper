@@ -48,6 +48,7 @@ python main.py
   |- bedrock_connect_helper/
     |- bedrock_connect_helper.py # BedrockConnectHelper class
     |- bedrock_endpoints.conf # An example of the list of endpoints
+    |- requirements.txt
 ```
 
 ## Security
