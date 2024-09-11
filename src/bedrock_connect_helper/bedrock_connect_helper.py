@@ -61,6 +61,8 @@ class BedrockConnectHelper:
 
         if model_id:
             self.model_id = model_id
+        else:
+            self.model_id = ''
 
         if config_file_path:
             self.config_file_path = config_file_path
@@ -70,9 +72,13 @@ class BedrockConnectHelper:
 
         self.raw_region_configs = []
         self.failed_regions = []
+
+        # Optional API parameters
         self.inferenceConfig = {}
         self.toolConfig = {}
         self.guardrailConfig = {}
+        self.additionalModelRequestFields = None
+        self.additionalModelResponseFieldPaths = []
 
         # Set customized config to botocore
         self.config = botocore.config.Config(
@@ -257,6 +263,34 @@ class BedrockConnectHelper:
                 break
 
         return False
+
+    def converse(self, messages, system=[], modelId='', inferenceConfig={},
+            toolConfig={}, guardrailConfig={}, additionalModelRequestFields=None,
+            additionalModelResponseFieldPaths=[]):
+        """A mask method of BedrockRuntime.Client.converse()
+
+            Doc: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime/client/converse.html
+        """
+
+        output = None
+
+        if not messages:
+            return output
+
+        if modelId:
+            self.set_model_id(modelId)
+
+        if inferenceConfig:
+            self.set_inference_config(inferenceConfig, additionalModelRequestFields)
+
+        if toolConfig:
+            self.set_tool_config(toolConfig)
+
+        if guardrailConfig:
+            self.set_guardrail_config(guardrailConfig)
+
+        return self.bedrock_converse_with_retry(messages, system=system)
+
 
     def disable_region_in_conf(self, disable_regions=[]):
         """

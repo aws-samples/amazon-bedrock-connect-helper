@@ -29,7 +29,7 @@ prompt = [
 bedrock_helper = BedrockConnectHelper(model_id=model_id, auto_load_config=True, config_file_path=filename, debug_mode=False)
 
 # Send the Request
-response = bedrock_helper.bedrock_converse_with_retry(prompt, system_prompt) # Converse API
+response = bedrock_helper.converse(messages=prompt, system=system_prompt) # Converse API
 print('# BEDROCK RESPONSE:', response)
 print('# FAILED REGIONS:', bedrock_helper.failed_regions)
 
