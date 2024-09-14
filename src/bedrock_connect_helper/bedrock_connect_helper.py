@@ -38,16 +38,17 @@ class BedrockConnectHelper:
     debug_mode = False
     api_method = 'converse'
     data_type = 'text'
-    read_timeout = 900
-    connect_timeout = 900
+    read_timeout = 5
+    connect_timeout = 5
 
     # Bedrock API parameters
     accept = 'application/json'
-    content_type = 'application/json'
+    contentType = 'application/json'
 
     error_logs = []
 
-    def __init__(self, model_id='', auto_load_config=True, config_file_path='', debug_mode=False, api_read_timeout=900, api_connect_timeout=900):
+    def __init__(self, model_id='', auto_load_config=True, auto_update_config=False, config_file_path='',
+            debug_mode=False, api_read_timeout=5, api_connect_timeout=5):
         """
         Initialize an instance of the class
         
@@ -57,6 +58,7 @@ class BedrockConnectHelper:
         Args:
             model_id (string) --  One of Amazon Bedrock model ids for inference.
             auto_load_config (bool) -- Allow the instance initialization to automatically load the endpoint configuration file or not.
+            auto_update_config(bool) -- Allow the class destructor to automatically retrieve failed endpoints and update configuration file.
             config_file_path (string) -- Set a customized configuation file path.
             debug_mode (bool) -- Allow the debug() method to print out logs. 
             api_read_timeout (int) -- Set botocore.config.Config: read_timeout.
@@ -76,8 +78,11 @@ class BedrockConnectHelper:
         if debug_mode:
             self.debug_mode = debug_mode
 
+        self.auto_update_config = auto_update_config
+
         self.raw_region_configs = []
         self.failed_regions = []
+        self.response = {}
         self.bedrock_utilities = {}
 
         # Optional API parameters
@@ -310,6 +315,7 @@ class BedrockConnectHelper:
             if self.api_method: # Use BedrockConnectUtil object
                 bedrock_util = self.bedrock_utilities[self.api_method]
                 stream_data = bedrock_util.retrieve_response_stream_chunk(self.stream_data, contentOnly)
+                self.debug(f"## Stream data:\n{stream_data}")
 
                 if stream_data:
                     output = self.bedrock_utilities[self.api_method].retrieve_response_streamdata(stream_data, contentOnly)
@@ -355,7 +361,7 @@ class BedrockConnectHelper:
 
                 # Assign the bedrock method to a variable
                 call_bedrock_runtime_api = getattr(bedrock, self.api_method)
-                self.debug(f"\n#Use region: {region_name} via API {self.api_method}\n")
+                self.debug(f"\n# Use region: {region_name} via API {self.api_method}\n")
 
                 # Construct Bedrock Cross-region inference profile ID
                 if self.ENABLE_CROSS_REGION_INFERENCE:
@@ -418,7 +424,17 @@ class BedrockConnectHelper:
 
                                 retry_time += 1
                                 continue
+                        except (bedrock.exceptions.ValidationException, botocore.exceptions.ParamValidationError) as e:
+                            """ Do not add endpoints to failed regions for ValidationException or ParamValidationError,
+                                to prevent from unexpected removing all available endpoints.
+                            """
+                            error_msg = f"ERROR: Invoke '{model_id}' error. Reason: {e}"
+                            self.error_logs.append(error_msg)
+                            self.debug(error_msg)
 
+                            retry_time += 1
+
+                            continue
                         except (botocore.exceptions.ClientError, Exception) as e:
                             error_msg = f"ERROR: Can't invoke '{model_id}'. Reason: {e}"
                             self.error_logs.append(error_msg)
@@ -638,6 +654,9 @@ class BedrockConnectHelper:
         Retrieve all failed endpoints and update next_available_time to them,
         when the object is destroyed.
         """
+        if not self.auto_update_config:
+            return
+
         # Update Bedrock Endpoint Configuration File
         new_config = self.disable_region_in_conf()
 

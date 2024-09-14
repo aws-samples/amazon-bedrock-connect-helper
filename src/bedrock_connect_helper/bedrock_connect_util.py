@@ -8,6 +8,7 @@ BedrockConnectUtil: The parent utility class.
 BedrockConnectUtilInvokeModel: A sub-class of BedrockConnectUtil class that provides data-handling methods for Bedrock InvokeModel & InvokeModelWithResponseStream APIs.
 BedrockConnectUtilConverse: A sub-class of BedrockConnectUtil class that provides data-handling methods for Bedrock Converse & ConverseStream APIs.
 """
+import botocore
 
 class BedrockConnectUtilFactory:
     """
@@ -89,6 +90,9 @@ class BedrockConnectUtil:
                     else:
                         output += str(chunk_data)
 
+                except botocore.exceptions.EventStreamError as e:
+                    self.debug(f"Error processing event stream: {e}")
+                    break
                 except StopIteration:
                     break
 
