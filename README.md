@@ -58,7 +58,7 @@ Although none of the customer data is stored in either the primary or secondary 
 - An [AWS account](https://aws.amazon.com/).
 - Access to Bedrock and Claude 3 Haiku model in your AWS regions.
 - Amazon IAM Role set up with sufficient permissions to access Amazon Bedrock. For details, see [IAM policy](https://docs.aws.amazon.com/bedrock/latest/userguide/security-iam.html)
-- Sufficient limits of Bedrock Requests Per Minute (RPM) and Tokens Per Minute (TPM) in all regions listed in your [bedrock_endpoints.conf](src/bedrock_connect_helper/bedrock_endpionts.conf) file.
+- Sufficient limits of Bedrock Requests Per Minute (RPM) and Tokens Per Minute (TPM) in all regions listed in your [bedrock_endpoints.conf](src/bedrock_connect_helper/bedrock_endpoints.conf) file.
 - An Amazon EC2 instance or deployment environment with the assigned IAM Role.
 - AWS SDK for Python (boto3) installed on the Amazon EC2 instance or deployment environment.
 
