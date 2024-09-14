@@ -10,6 +10,7 @@ Key configurations:
     PRIMARY_REGION_RANDOM_DISTRIBUTION (bool) -- Randomly select one of primary regions for the initial API request and prioritize 
         primary regions over other regions when it is set to True.
     NEXT_RETRY_TIME_WINDOW (int) -- The time window (in seconds) added to the current time to set the next available time for failed endpoints.
+    ENABLE_CROSS_REGION_INFERENCE (bool) - Whether use Amazon Bedrock cross-region inferece feature
 """
 import json
 import time
@@ -19,14 +20,19 @@ import random
 import boto3
 import botocore
 
+from .bedrock_connect_util import * # Import the BedrockConnectUtil classes
+
 class BedrockConnectHelper:
 
     # Global configurations
     MAX_RETRY_TIME = 5
     NEXT_RETRY_TIME_WINDOW = 3600  # 1 hour
     MULTI_REGION_RETRY = True
-    MAX_RETRY_TIMES_FOR_EACH_REGION = 2
+    MAX_RETRY_TIMES_FOR_EACH_REGION = 1
     PRIMARY_REGION_RANDOM_DISTRIBUTION = True
+    ENABLE_CROSS_REGION_INFERENCE = False
+
+    VALID_BEDROCK_APIS = ['converse', 'converse_stream', 'invoke_model', 'invoke_model_with_response_stream']
 
     # Shared attributes
     debug_mode = False
@@ -72,6 +78,7 @@ class BedrockConnectHelper:
 
         self.raw_region_configs = []
         self.failed_regions = []
+        self.bedrock_utilities = {}
 
         # Optional API parameters
         self.inferenceConfig = {}
@@ -94,6 +101,7 @@ class BedrockConnectHelper:
 
             ## Retrieve currently validate regions from the bedrock_endpoints.conf
             self.validate_regions = self.get_validate_regions_from_conf(self.raw_region_configs)
+
 
     def load_conf_file(self, file_path=''):
         """
@@ -166,6 +174,22 @@ class BedrockConnectHelper:
 
         return validate_regions
 
+
+    def set_cross_region_inference(self, enable_cross_region):
+        self.ENABLE_CROSS_REGION_INFERENCE = enable_cross_region
+
+        return self
+
+    def set_api_method(self, api_method):
+        """Set API method and create relevant Utility object"""
+        if api_method and api_method in self.VALID_BEDROCK_APIS:
+            self.api_method = api_method
+
+            # Get instance of API utility class
+            self.bedrock_utilities[self.api_method] = BedrockConnectUtilFactory.getInstance(apiMethod=self.api_method, debugMode=self.debug_mode)
+
+        return self
+
     def set_model_id(self, model_id):
         if model_id:
             self.model_id = model_id
@@ -193,6 +217,106 @@ class BedrockConnectHelper:
 
         return self
 
+
+    def constract_api_kwargs(self, api_request_kwargs, api_method='', **kwargs):
+        """
+        Construct optional API arguments based on API method name
+
+        Args:
+            api_request_kwargs(dict) - Required API parameters
+            api_method(str) - API method name: converse | invoke_model
+            **kwargs(dict) - Optional arguments
+
+        Returns:
+            Dictionary: Extraction of specific item(s) or Original Required API parameters
+        """
+
+        if api_request_kwargs is None:
+            self.debug("Invalid API PARAMS!\n")
+            return api_request_kwargs
+
+        if api_method:
+            self.set_api_method(api_method)
+
+        if self.api_method in ["converse", "converse_stream"]:
+            # Pre-defined valid parameters of Bedrock Converse API
+            attributes = ['inferenceConfig', 'toolConfig', 'guardrailConfig', 'additionalModelRequestFields', 'additionalModelResponseFieldPaths']
+
+        elif self.api_method in ['invoke_model', 'invoke_model_with_response_stream']:
+            attributes = ['contentType', 'accept', 'trace', 'guardrailIdentifier', 'guardrailVersion']
+
+        # Iterate all optional parameter names and get their values
+        for attr_name in attributes:
+            instance_attribute = getattr(self, attr_name)
+            self.debug(f"## INSTANCE ATTRIBUTE {attr_name}:\n{instance_attribute}")
+
+            if instance_attribute:
+                if api_request_kwargs is not None:
+                    api_request_kwargs.update({attr_name: instance_attribute})
+                else:
+                    api_request_kwargs = {attr_name: instance_attribute}
+
+        return api_request_kwargs
+
+    def extract_response(self, key='content', depth=2):
+        """Extract an attribute from LLM response JSON
+        Args:
+            api_method(string): Converse API or InvokeModel API
+            streaming(bool):
+            key (string): Attribute name to extract; enum [content, usage]
+            depth (int): 
+        """
+        output = None
+
+        if self.response is not None:
+
+            if self.api_method == 'converse':
+
+                if (key == 'content' and 'output' in self.response
+                    and 'message' in self.response['output']):
+                    # Retrieve Content
+                    output = self.response['output']['message'][key]
+                elif key == 'usage' and key in self.response:
+                    output = self.response[key]
+            
+            elif self.api_method == 'converse_stream':
+                output = self.response.get('stream')
+                self.stream_data = output
+                depth = 0
+
+            elif self.api_method == 'invoke_model':
+                output = json.loads(self.response.get('body').read())[key]
+
+            elif self.api_method == "invoke_model_with_response_stream":
+                output = self.response.get('body')
+                self.stream_data = output
+                depth = 0
+        
+        if output is not None:
+            if depth == 1:
+                output = output[0]
+            elif depth == 2:
+                output = output[0][self.data_type]
+
+        return output
+
+
+    def retrieve_response_stream(self, contentOnly=True):
+        """Retriev streaming response data"""
+        output = ''
+
+        if self.stream_data:
+
+            if self.api_method: # Use BedrockConnectUtil object
+                bedrock_util = self.bedrock_utilities[self.api_method]
+                stream_data = bedrock_util.retrieve_response_stream_chunk(self.stream_data, contentOnly)
+
+                if stream_data:
+                    output = self.bedrock_utilities[self.api_method].retrieve_response_streamdata(stream_data, contentOnly)
+        
+        return output
+
+
     def bedrock_converse_with_retry(self, messages, system=[], extract_content=False):
         """
         Send a request to Amazon Bedrock Converse API and retry according to related configurations
@@ -203,6 +327,8 @@ class BedrockConnectHelper:
             system (list): System prompts.
             extract_content (bool): Return the raw API response when given False. Only return the "content" when given True.
         """
+        output = False
+
         if not messages:
             error_msg = 'Argument "messages" is invalid!'
             self.error_logs.append(error_msg)
@@ -210,7 +336,7 @@ class BedrockConnectHelper:
 
             return False
 
-        if len(self.validate_regions) == 0:
+        if not self.validate_regions:
             error_msg = 'No available endpoint!'
             self.error_logs.append(error_msg)
             self.debug(error_msg)
@@ -218,12 +344,27 @@ class BedrockConnectHelper:
             return False
 
         retry_time = 0
+        model_id = self.model_id # Need a runtime model_id because of Bedrock cross-region inference profile ID.
 
         for region_name in self.validate_regions: # Loop through available endpoints until configured exit criteria is met.
 
             if region_name is not None and retry_time < self.MAX_RETRY_TIME:
+                region_profile_prefix = ''
+
                 bedrock = boto3.client('bedrock-runtime', region_name=region_name, config=self.config) # Initialize a regional Bedrock client
-                self.debug(f"Use region: {region_name}")
+
+                # Assign the bedrock method to a variable
+                call_bedrock_runtime_api = getattr(bedrock, self.api_method)
+                self.debug(f"\n#Use region: {region_name} via API {self.api_method}\n")
+
+                # Construct Bedrock Cross-region inference profile ID
+                if self.ENABLE_CROSS_REGION_INFERENCE:
+                    region_profile_prefix = next((regional_data['region_profile_prefix'] for regional_data in self.raw_region_configs if regional_data['region'] == region_name), None)
+
+                    if region_profile_prefix:
+                        model_id = region_profile_prefix + '.' + self.model_id
+                    else:
+                        self.debug(f"Failed to construct regional cross-region inference profile ID!\n")
 
                 for one_region_retry_time in range(self.MAX_RETRY_TIMES_FOR_EACH_REGION):
                     # Retry the request to one region
@@ -231,13 +372,44 @@ class BedrockConnectHelper:
                     if retry_time < self.MAX_RETRY_TIME:
 
                         try:
-                            response = bedrock.converse(modelId=self.model_id, messages=messages, system=system, inferenceConfig=self.inferenceConfig)
+
+                            # Construct API arguments based on API method name
+                            if self.api_method in ['converse', 'converse_stream']:
+
+                                llm_api_kwargs = {
+                                    'modelId': model_id,
+                                    'messages': messages,
+                                    'system': system
+                                }
+
+                            elif self.api_method in ['invoke_model', 'invoke_model_with_response_stream']:
+
+                                llm_api_kwargs = {
+                                    'modelId': model_id,
+                                    'body': messages,
+                                }
+                            else:
+                                break # Better handle errors
+
+                            # Add optional LLM API parameters based on the API name
+                            llm_api_kwargs = self.constract_api_kwargs(llm_api_kwargs)
+                            self.debug(f"## ADD API KWARGS:\n {llm_api_kwargs}\n")
+
+                            # Call LLM API Bedrock Converse
+                            if llm_api_kwargs is not None:
+                                # Pass required parameters and optional parameters to the LLM API
+                                response = call_bedrock_runtime_api(**llm_api_kwargs)
+                            else:
+                                self.debug(f"Failed! No valid parameters for the API request at LINE []!\n")
+                                return False # @TODO: It should raise an exception
+
+                            self.debug(f"Inference modelID: {model_id}")
 
                             if response:
                                 self.response = response
 
-                                if extract_content and response['output']['message']['content'][0]:
-                                    return response['output']['message']['content'][0]
+                                if extract_content:
+                                    return self.extract_response('content')
                                 else:
                                     return response
                             else:
@@ -248,7 +420,7 @@ class BedrockConnectHelper:
                                 continue
 
                         except (botocore.exceptions.ClientError, Exception) as e:
-                            error_msg = f"ERROR: Can't invoke '{self.model_id}'. Reason: {e}"
+                            error_msg = f"ERROR: Can't invoke '{model_id}'. Reason: {e}"
                             self.error_logs.append(error_msg)
                             self.debug(error_msg)
                             
@@ -264,6 +436,7 @@ class BedrockConnectHelper:
 
         return False
 
+
     def converse(self, messages, system=[], modelId='', inferenceConfig={},
             toolConfig={}, guardrailConfig={}, additionalModelRequestFields=None,
             additionalModelResponseFieldPaths=[]):
@@ -271,8 +444,39 @@ class BedrockConnectHelper:
 
             Doc: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime/client/converse.html
         """
+        output = None
+
+        if not messages:
+            return output
+
+        self.set_api_method('converse')
+
+        if modelId:
+            self.set_model_id(modelId)
+
+        if inferenceConfig:
+            self.set_inference_config(inferenceConfig, additionalModelRequestFields)
+
+        if toolConfig:
+            self.set_tool_config(toolConfig)
+
+        if guardrailConfig:
+            self.set_guardrail_config(guardrailConfig)
+
+        return self.bedrock_converse_with_retry(messages, system=system)
+
+
+    def converse_stream(self, messages, system=[], modelId='', inferenceConfig={},
+            toolConfig={}, guardrailConfig={}, additionalModelRequestFields=None,
+            additionalModelResponseFieldPaths=[]):
+        """A mask method of BedrockRuntime.Client.converse_stream()
+
+            Doc: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime/client/converse_stream.html
+        """
 
         output = None
+
+        self.set_api_method('converse_stream')
 
         if not messages:
             return output
@@ -292,6 +496,84 @@ class BedrockConnectHelper:
         return self.bedrock_converse_with_retry(messages, system=system)
 
 
+    def invoke_model(self, body, modelId='', **kwargs):
+        """A mask method of BedrockRuntime.Client.invoke_mode()
+
+            Doc: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime/client/invoke_model.html
+        """
+        output = None
+
+        self.set_api_method('invoke_model')
+
+        if not body:
+            return output
+
+        if modelId:
+            self.model_id = modelId
+        
+        if 'contentType' in kwargs:
+            self.contentType = kwargs['contentType']
+
+        if 'accept' in kwargs:
+            self.accept = kwargs['accept']
+
+        if 'trace' in kwargs and kwargs['trace'] == 'ENABLED':
+            self.trace = trace
+        else:
+            self.trace = 'DISABLED'
+
+        if 'guardrailIdentifier' in kwargs:
+            self.guardrailIdentifier = kwargs['guardrailIdentifier']
+        else:
+            self.guardrailIdentifier = None
+
+        if 'guardrailVersion' in kwargs:
+            self.guardrailVersion = kwargs['guardrailVersion']
+        else:
+            self.guardrailVersion = None
+
+        return self.bedrock_converse_with_retry(messages=body)
+
+
+    def invoke_model_with_response_stream(self, body, modelId='', **kwargs):
+        """A mask method of BedrockRuntime.Client.invoke_mode_with_response_stream()
+
+            Doc: https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime/client/invoke_model_with_response_stream.html
+        """
+        output = None
+
+        self.set_api_method('invoke_model_with_response_stream')
+
+        if not body:
+            return output
+
+        if modelId:
+            self.model_id = modelId
+        
+        if 'contentType' in kwargs:
+            self.contentType = kwargs['contentType']
+
+        if 'accept' in kwargs:
+            self.accept = kwargs['accept']
+
+        if 'trace' in kwargs and kwargs['trace'] == 'ENABLED':
+            self.trace = trace
+        else:
+            self.trace = 'DISABLED'
+
+        if 'guardrailIdentifier' in kwargs:
+            self.guardrailIdentifier = kwargs['guardrailIdentifier']
+        else:
+            self.guardrailIdentifier = None
+
+        if 'guardrailVersion' in kwargs:
+            self.guardrailVersion = kwargs['guardrailVersion']
+        else:
+            self.guardrailVersion = None
+
+        return self.bedrock_converse_with_retry(messages=body)
+
+
     def disable_region_in_conf(self, disable_regions=[]):
         """
         Set the next available timestamp to disable a region in the configuration file
@@ -304,7 +586,7 @@ class BedrockConnectHelper:
         next_timestamp = self.current_time + self.NEXT_RETRY_TIME_WINDOW
         self.debug(f"## NEXT AVAILABLE TIME: {next_timestamp}")
 
-        if len(disable_regions) == 0:
+        if not disable_regions:
             disable_regions = self.failed_regions
 
         disable_count = len(disable_regions)
@@ -318,6 +600,7 @@ class BedrockConnectHelper:
                 region_data['next_available_time'] = next_timestamp
 
         return self.raw_region_configs
+
 
     def write_json_to_file_with_lock(self, data):
         """
@@ -346,6 +629,22 @@ class BedrockConnectHelper:
         except IOError as e:
             self.debug(f"Error writing to file: {e}")
             return False
+
+
+    def __del__(self):
+        """
+        Class Destructor
+        
+        Retrieve all failed endpoints and update next_available_time to them,
+        when the object is destroyed.
+        """
+        # Update Bedrock Endpoint Configuration File
+        new_config = self.disable_region_in_conf()
+
+        if new_config is not None:
+            ## Write the updated region configurations back to the bedrock_endpoints.conf
+            conf_save_result = self.write_json_to_file_with_lock(new_config)
+
 
     def set_debug_mode(self, status=False):
         """Switch the debug mode on/off."""
